@@ -1,0 +1,346 @@
+name: Cross Compile
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# All branch builds publish the same rolling `dev` tag/release. Cancel an older
+# branch run before a newer one can overwrite it; tag releases remain isolated
+# by their full ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_type == 'branch' && 'dev' || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  meta:
+    name: Build Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      commit: ${{ steps.meta.outputs.commit }}
+      build_time: ${{ steps.meta.outputs.build_time }}
+    steps:
+      - name: Resolve version metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${GITHUB_SHA::7}"
+          BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          elif [[ "${GITHUB_REF}" == refs/heads/master || "${GITHUB_REF}" == refs/heads/main ]]; then
+            DATE="$(date -u +'%Y%m%d')"
+            RUN_NUM="$(printf '%04d' "${GITHUB_RUN_NUMBER}")"
+            VERSION="dev-${RUN_NUM}-${DATE}-${SHORT_SHA}"
+          else
+            VERSION="dev"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "commit=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_time=${BUILD_TIME}" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run Go tests
+        run: go test ./...
+
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    needs:
+      - meta
+      - test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-amd64
+            goos: windows
+            goarch: amd64
+            ext: ".exe"
+          - target: windows-arm64
+            goos: windows
+            goarch: arm64
+            ext: ".exe"
+          - target: linux-amd64
+            goos: linux
+            goarch: amd64
+            ext: ""
+          - target: linux-arm64
+            goos: linux
+            goarch: arm64
+            ext: ""
+          - target: linux-riscv64
+            goos: linux
+            goarch: riscv64
+            ext: ""
+          - target: darwin-amd64
+            goos: darwin
+            goarch: amd64
+            ext: ""
+          - target: darwin-arm64
+            goos: darwin
+            goarch: arm64
+            ext: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          VERSION="${{ needs.meta.outputs.version }}"
+          COMMIT="${{ needs.meta.outputs.commit }}"
+          BUILD_TIME="${{ needs.meta.outputs.build_time }}"
+          PKG="github.com/lieyan/responses2chat/internal/version"
+
+          BIN="responses2chat-${{ matrix.target }}${{ matrix.ext }}"
+          go build -trimpath \
+            -ldflags="-s -w -X ${PKG}.Version=${VERSION} -X ${PKG}.Commit=${COMMIT} -X ${PKG}.BuildTime=${BUILD_TIME}" \
+            -o "dist/${BIN}" ./cmd/responses2chat
+          (
+            cd dist
+            sha256sum "${BIN}" > "${BIN}.sha256"
+          )
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: responses2chat-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 3
+
+  release-dev:
+    name: Publish Dev Release
+    runs-on: ubuntu-latest
+    needs:
+      - meta
+      - build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build release metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${{ needs.meta.outputs.commit }}"
+          echo "title=Dev Build #${GITHUB_RUN_NUMBER} (${SHORT_SHA})" >> "$GITHUB_OUTPUT"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: responses2chat-*
+          path: release
+          merge-multiple: true
+
+      - name: Add version metadata
+        run: |
+          set -euo pipefail
+          cat > release/version.json <<'EOF'
+          {
+            "version": "${{ needs.meta.outputs.version }}",
+            "commit": "${{ needs.meta.outputs.commit }}",
+            "build_time": "${{ needs.meta.outputs.build_time }}",
+            "tag": "dev"
+          }
+          EOF
+
+      - name: Verify release asset set
+        run: |
+          set -euo pipefail
+          expected=(
+            responses2chat-windows-amd64.exe
+            responses2chat-windows-arm64.exe
+            responses2chat-linux-amd64
+            responses2chat-linux-arm64
+            responses2chat-linux-riscv64
+            responses2chat-darwin-amd64
+            responses2chat-darwin-arm64
+          )
+          for binary in "${expected[@]}"; do
+            test -f "release/${binary}" || { echo "missing release/${binary}" >&2; exit 1; }
+            test -f "release/${binary}.sha256" || { echo "missing release/${binary}.sha256" >&2; exit 1; }
+          done
+
+      - name: Sign release assets
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${UPDATE_SIGNING_KEY}" ]; then
+            echo "UPDATE_SIGNING_KEY secret is not set" >&2
+            exit 1
+          fi
+          go run ./scripts/sign release/*.sha256 release/version.json
+
+      - name: Refresh dev tag and prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete dev --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag || true
+          git tag -f dev "${GITHUB_SHA}"
+          git push --force origin refs/tags/dev
+          gh release create dev release/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${{ steps.meta.outputs.title }}" \
+            --notes "Dev build for ${GITHUB_SHA}" \
+            --prerelease \
+            --target "${GITHUB_SHA}" \
+            --latest=false
+
+  release-prod:
+    name: Publish Prod Release
+    runs-on: ubuntu-latest
+    needs:
+      - meta
+      - build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: responses2chat-*
+          path: release
+          merge-multiple: true
+
+      - name: Add version metadata
+        run: |
+          set -euo pipefail
+          cat > release/version.json <<'EOF'
+          {
+            "version": "${{ needs.meta.outputs.version }}",
+            "commit": "${{ needs.meta.outputs.commit }}",
+            "build_time": "${{ needs.meta.outputs.build_time }}",
+            "tag": "${{ github.ref_name }}"
+          }
+          EOF
+
+      - name: Verify release asset set
+        run: |
+          set -euo pipefail
+          expected=(
+            responses2chat-windows-amd64.exe
+            responses2chat-windows-arm64.exe
+            responses2chat-linux-amd64
+            responses2chat-linux-arm64
+            responses2chat-linux-riscv64
+            responses2chat-darwin-amd64
+            responses2chat-darwin-arm64
+          )
+          for binary in "${expected[@]}"; do
+            test -f "release/${binary}" || { echo "missing release/${binary}" >&2; exit 1; }
+            test -f "release/${binary}.sha256" || { echo "missing release/${binary}.sha256" >&2; exit 1; }
+          done
+
+      - name: Sign release assets
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${UPDATE_SIGNING_KEY}" ]; then
+            echo "UPDATE_SIGNING_KEY secret is not set" >&2
+            exit 1
+          fi
+          go run ./scripts/sign release/*.sha256 release/version.json
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          prerelease: false
+          generate_release_notes: true
+          make_latest: true
+          files: release/*
+
+  cleanup-artifacts:
+    name: Clean Up Old Artifacts
+    needs:
+      - build
+      - release-dev
+      - release-prod
+    if: ${{ always() && !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Delete artifacts from previous runs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const artifacts = await github.paginate(
+              github.rest.actions.listArtifactsForRepo,
+              { owner, repo, per_page: 100 },
+            );
+
+            const runStatus = new Map();
+            for (const artifact of artifacts) {
+              const runId = artifact.workflow_run?.id;
+              if (!runId || runId === context.runId) continue;
+              if (!runStatus.has(runId)) {
+                const { data: run } = await github.rest.actions.getWorkflowRun({
+                  owner,
+                  repo,
+                  run_id: runId,
+                });
+                runStatus.set(runId, run.status);
+              }
+              // Never delete an artifact that another queued/in-progress run
+              // may still need for its release job.
+              if (runStatus.get(runId) !== 'completed') continue;
+              await github.rest.actions.deleteArtifact({
+                owner,
+                repo,
+                artifact_id: artifact.id,
+              });
+            }

@@ -154,3 +154,18 @@ go vet ./...
 - [Chat Completions create reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
 - [Migrate to the Responses API](https://developers.openai.com/api/docs/guides/migrate-to-responses)
 - [Function calling](https://developers.openai.com/api/docs/guides/function-calling)
+
+## 自更新(OTA)
+
+CI 在 push master 时发布滚动 `dev` prerelease,push `v*` tag 时发布正式 release;
+所有资产附带 `.sha256` 与 Ed25519 签名 `.sha256.sig`,客户端强制验签。
+
+```bash
+responses2chat version           # 查看当前版本
+responses2chat update -check     # 仅检查是否有新版本
+responses2chat update            # 下载、验签并原地替换二进制(Unix 下 PID 不变)
+responses2chat update -channel dev   # 跟进 dev 滚动预发布
+```
+
+可用环境变量:`UPDATE_CHANNEL`(stable|dev)、`UPDATE_SOURCE`(github|proxy)、
+`UPDATE_PROXY_URL`、`UPDATE_REPO`(默认 `lieyanc/responses2chat`)。
