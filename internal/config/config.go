@@ -45,7 +45,18 @@ type Config struct {
 	// proxy environment variables (HTTP_PROXY/HTTPS_PROXY/NO_PROXY).
 	UpstreamProxyURL     string `json:"upstream_proxy_url"`
 	ReasoningPassthrough bool   `json:"reasoning_passthrough"`
-	Update               Update `json:"update"`
+	// RetryUnsupportedParams retries a request once, with the offending
+	// fields removed, when the upstream rejects it with a 400 error naming
+	// unsupported parameters (e.g. "Unsupported parameter(s): `prompt_cache_key`").
+	// A pointer so that a missing key defaults to enabled.
+	RetryUnsupportedParams *bool  `json:"retry_unsupported_params"`
+	Update                 Update `json:"update"`
+}
+
+// RetryUnsupportedParamsEnabled reports the retry_unsupported_params
+// setting, defaulting to true when the key is absent.
+func (c Config) RetryUnsupportedParamsEnabled() bool {
+	return c.RetryUnsupportedParams == nil || *c.RetryUnsupportedParams
 }
 
 // Load parses the file at path and applies defaults. Serving traffic

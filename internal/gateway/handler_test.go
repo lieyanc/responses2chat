@@ -338,3 +338,87 @@ func TestCopyEndToEndHeadersRemovesConnectionTokens(t *testing.T) {
 		t.Fatalf("hop-by-hop headers leaked: %#v", destination)
 	}
 }
+
+func TestHandlerRetriesWithoutUnsupportedParams(t *testing.T) {
+	var attempts int
+	var bodies []map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		bodies = append(bodies, request)
+		if _, ok := request["prompt_cache_key"]; ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"Validation: Unsupported parameter(s): `+"`prompt_cache_key`"+`","type":"invalid_request_error"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+	      "id":"chatcmpl-retry",
+	      "object":"chat.completion",
+	      "created":123,
+	      "model":"test-model",
+	      "choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+	      "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+	    }`)
+	}))
+	defer upstream.Close()
+
+	handler, err := New(Config{UpstreamURL: upstream.URL + "/v1/chat/completions", RetryUnsupportedParams: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := http.Post(server.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"test-model","input":"hi","prompt_cache_key":"cache-1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("status = %d, body = %s", response.StatusCode, body)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if _, ok := bodies[1]["prompt_cache_key"]; ok {
+		t.Fatalf("retry still contains prompt_cache_key: %#v", bodies[1])
+	}
+}
+
+func TestHandlerRetryDisabledPassesErrorThrough(t *testing.T) {
+	var attempts int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"Validation: Unsupported parameter(s): `+"`prompt_cache_key`"+`","type":"invalid_request_error"}}`)
+	}))
+	defer upstream.Close()
+
+	handler, err := New(Config{UpstreamURL: upstream.URL + "/v1/chat/completions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := http.Post(server.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"test-model","input":"hi","prompt_cache_key":"cache-1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", response.StatusCode)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}

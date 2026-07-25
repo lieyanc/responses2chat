@@ -70,9 +70,10 @@ func main() {
 	}
 
 	handler, err := gateway.New(gateway.Config{
-		UpstreamURL:          upstream,
-		MaxBodySize:          32 << 20,
-		ReasoningPassthrough: cfg.ReasoningPassthrough,
+		UpstreamURL:            upstream,
+		MaxBodySize:            32 << 20,
+		ReasoningPassthrough:   cfg.ReasoningPassthrough,
+		RetryUnsupportedParams: cfg.RetryUnsupportedParamsEnabled(),
 		HTTPClient: &http.Client{
 			Transport: &http.Transport{
 				Proxy:                 proxy,

@@ -4,6 +4,7 @@
   "upstream_chat_completions_url": "",
   "upstream_proxy_url": "",
   "reasoning_passthrough": false,
+  "retry_unsupported_params": true,
   "update": {
     "channel": "stable",
     "source": "github",

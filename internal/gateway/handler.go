@@ -9,7 +9,9 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -21,14 +23,20 @@ type Config struct {
 	// upstream as the non-standard assistant reasoning_content field, and maps
 	// upstream reasoning_content back to Responses reasoning output Items.
 	ReasoningPassthrough bool
+	// RetryUnsupportedParams retries a converted request once, with the
+	// offending fields removed, when the upstream rejects it with a 400
+	// error naming unsupported parameters (e.g. "Unsupported parameter(s):
+	// `prompt_cache_key`").
+	RetryUnsupportedParams bool
 }
 
 type Handler struct {
-	upstreamURL          string
-	maxBodySize          int64
-	client               *http.Client
-	logger               *log.Logger
-	reasoningPassthrough bool
+	upstreamURL            string
+	maxBodySize            int64
+	client                 *http.Client
+	logger                 *log.Logger
+	reasoningPassthrough   bool
+	retryUnsupportedParams bool
 }
 
 func New(config Config) (*Handler, error) {
@@ -46,11 +54,12 @@ func New(config Config) (*Handler, error) {
 		config.Logger = log.Default()
 	}
 	return &Handler{
-		upstreamURL:          parsed.String(),
-		maxBodySize:          config.MaxBodySize,
-		client:               config.HTTPClient,
-		logger:               config.Logger,
-		reasoningPassthrough: config.ReasoningPassthrough,
+		upstreamURL:            parsed.String(),
+		maxBodySize:            config.MaxBodySize,
+		client:                 config.HTTPClient,
+		logger:                 config.Logger,
+		reasoningPassthrough:   config.ReasoningPassthrough,
+		retryUnsupportedParams: config.RetryUnsupportedParams,
 	}, nil
 }
 
@@ -59,16 +68,51 @@ func ChatCompletionsURL(base string) string {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	switch {
-	case r.Method == http.MethodGet && r.URL.Path == "/healthz":
+	if r.Method == http.MethodGet && r.URL.Path == "/healthz" {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"status":"ok"}`)
+		return
+	}
+
+	h.logger.Printf("request: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+	start := time.Now()
+	recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+
+	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/responses":
-		h.createResponse(w, r)
+		h.createResponse(recorder, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
-		h.proxyChatCompletions(w, r)
+		h.proxyChatCompletions(recorder, r)
 	default:
-		writeAPIError(w, http.StatusNotFound, "route not found", "invalid_request_error", nil)
+		writeAPIError(recorder, http.StatusNotFound, "route not found", "invalid_request_error", nil)
+	}
+
+	h.logger.Printf("response: %s %s -> %d in %s (%d bytes)", r.Method, r.URL.Path, recorder.status, time.Since(start).Round(time.Millisecond), recorder.bytes)
+}
+
+// statusRecorder captures the status code and body size written by the
+// handlers so ServeHTTP can log each completed request. It forwards Flush so
+// SSE streaming through the recorder keeps working.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+func (s *statusRecorder) WriteHeader(status int) {
+	s.status = status
+	s.ResponseWriter.WriteHeader(status)
+}
+
+func (s *statusRecorder) Write(p []byte) (int, error) {
+	n, err := s.ResponseWriter.Write(p)
+	s.bytes += int64(n)
+	return n, err
+}
+
+func (s *statusRecorder) Flush() {
+	if flusher, ok := s.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
 	}
 }
 
@@ -90,26 +134,29 @@ func (h *Handler) createResponse(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", nil)
 		return
 	}
+	h.logger.Printf("responses: model=%v stream=%t", chatRequest["model"], meta.stream)
 	upstreamBody, err := json.Marshal(chatRequest)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "failed to encode upstream request", "server_error", nil)
 		return
 	}
 
-	upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, h.upstreamURL, bytes.NewReader(upstreamBody))
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "failed to create upstream request", "server_error", nil)
-		return
-	}
-	copyEndToEndHeaders(upstreamRequest.Header, r.Header)
-	upstreamRequest.Header.Set("Content-Type", "application/json")
-	if meta.stream {
-		upstreamRequest.Header.Set("Accept", "text/event-stream")
-	} else {
-		upstreamRequest.Header.Set("Accept", "application/json")
+	sendUpstream := func(payload []byte) (*http.Response, error) {
+		upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, h.upstreamURL, bytes.NewReader(payload))
+		if err != nil {
+			return nil, err
+		}
+		copyEndToEndHeaders(upstreamRequest.Header, r.Header)
+		upstreamRequest.Header.Set("Content-Type", "application/json")
+		if meta.stream {
+			upstreamRequest.Header.Set("Accept", "text/event-stream")
+		} else {
+			upstreamRequest.Header.Set("Accept", "application/json")
+		}
+		return h.client.Do(upstreamRequest)
 	}
 
-	upstreamResponse, err := h.client.Do(upstreamRequest)
+	upstreamResponse, err := sendUpstream(upstreamBody)
 	if err != nil {
 		if r.Context().Err() != nil {
 			return
@@ -117,6 +164,32 @@ func (h *Handler) createResponse(w http.ResponseWriter, r *http.Request) {
 		h.logger.Printf("upstream request failed: %v", err)
 		writeAPIError(w, http.StatusBadGateway, "upstream request failed", "upstream_error", nil)
 		return
+	}
+
+	if h.retryUnsupportedParams && upstreamResponse.StatusCode == http.StatusBadRequest {
+		errorBody, readErr := io.ReadAll(io.LimitReader(upstreamResponse.Body, h.maxBodySize))
+		upstreamResponse.Body.Close()
+		removed := stripUnsupportedParams(chatRequest, errorBody)
+		if readErr != nil || len(removed) == 0 {
+			copyEndToEndHeaders(w.Header(), upstreamResponse.Header)
+			writeProxiedError(w, upstreamResponse.StatusCode, errorBody, upstreamResponse.Status)
+			return
+		}
+		h.logger.Printf("upstream rejected unsupported parameter(s) %s; retrying without them", strings.Join(removed, ", "))
+		upstreamBody, err = json.Marshal(chatRequest)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "failed to encode upstream request", "server_error", nil)
+			return
+		}
+		upstreamResponse, err = sendUpstream(upstreamBody)
+		if err != nil {
+			if r.Context().Err() != nil {
+				return
+			}
+			h.logger.Printf("upstream retry failed: %v", err)
+			writeAPIError(w, http.StatusBadGateway, "upstream request failed", "upstream_error", nil)
+			return
+		}
 	}
 	defer upstreamResponse.Body.Close()
 	copyEndToEndHeaders(w.Header(), upstreamResponse.Header)
@@ -210,17 +283,55 @@ func (h *Handler) proxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) proxyError(w http.ResponseWriter, response *http.Response) {
 	body, err := io.ReadAll(response.Body)
-	if err == nil && json.Valid(body) {
+	if err != nil {
+		body = nil
+	}
+	writeProxiedError(w, response.StatusCode, body, response.Status)
+}
+
+func writeProxiedError(w http.ResponseWriter, status int, body []byte, statusText string) {
+	if len(body) > 0 && json.Valid(body) {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(response.StatusCode)
+		w.WriteHeader(status)
 		_, _ = w.Write(body)
 		return
 	}
 	message := strings.TrimSpace(string(body))
 	if message == "" {
-		message = response.Status
+		message = statusText
 	}
-	writeAPIError(w, response.StatusCode, message, "upstream_error", nil)
+	writeAPIError(w, status, message, "upstream_error", nil)
+}
+
+var quotedParamPattern = regexp.MustCompile("[`'\"]([A-Za-z0-9_]+)[`'\"]")
+
+// stripUnsupportedParams looks for upstream 400 messages of the form
+// "Unsupported parameter(s): `prompt_cache_key`" (or "Unknown parameter:
+// 'user'"), deletes the named top-level fields from request, and returns
+// the removed names. Fields the request cannot function without are never
+// removed.
+func stripUnsupportedParams(request map[string]any, errorBody []byte) []string {
+	text := string(errorBody)
+	lower := strings.ToLower(text)
+	idx := strings.Index(lower, "unsupported parameter")
+	if idx < 0 {
+		idx = strings.Index(lower, "unknown parameter")
+	}
+	if idx < 0 {
+		return nil
+	}
+	var removed []string
+	for _, match := range quotedParamPattern.FindAllStringSubmatch(text[idx:], -1) {
+		name := match[1]
+		if name == "model" || name == "messages" || name == "stream" {
+			continue
+		}
+		if _, ok := request[name]; ok {
+			delete(request, name)
+			removed = append(removed, name)
+		}
+	}
+	return removed
 }
 
 func writeAPIError(w http.ResponseWriter, status int, message, errorType string, code any) {

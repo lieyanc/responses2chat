@@ -49,6 +49,7 @@ go run ./cmd/responses2chat   # 正式启动
   "upstream_chat_completions_url": "",
   "upstream_proxy_url": "",
   "reasoning_passthrough": false,
+  "retry_unsupported_params": true,
   "update": {
     "channel": "stable",
     "source": "github",
@@ -64,6 +65,9 @@ go run ./cmd/responses2chat   # 正式启动
   `socks5`、`socks5h`（如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:1080`）。
   留空时回退到标准代理环境变量（`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`）。
 - `listen_addr` 留空时默认 `:8080`。
+- `retry_unsupported_params` 默认开启。当上游返回 400 且错误信息形如
+  ``Validation: Unsupported parameter(s): `prompt_cache_key` `` 时，
+  自动从请求中移除被点名的参数并重发一次；设为 `false` 则原样透传该错误。
 
 服务不会读取任何上游 Key。New API 发给转换层的
 `Authorization`、`x-api-key`、组织/项目头和其他端到端 HTTP 头会原样转发；

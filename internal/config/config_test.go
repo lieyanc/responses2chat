@@ -151,6 +151,7 @@ func TestMigrateAddsMissingSettings(t *testing.T) {
 		"upstream_chat_completions_url": true,
 		"upstream_proxy_url":            true,
 		"reasoning_passthrough":         true,
+		"retry_unsupported_params":      true,
 		"update.source":                 true,
 		"update.proxy_base_url":         true,
 		"update.repo":                   true,
