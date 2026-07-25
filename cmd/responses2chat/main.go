@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/lieyan/responses2chat/internal/config"
@@ -31,13 +32,22 @@ func main() {
 	configPath := flag.String("config", config.DefaultPath, "path to config.json")
 	flag.Parse()
 
-	cfg, err := config.Load(*configPath)
-	if os.IsNotExist(err) {
+	added, err := config.Migrate(*configPath)
+	switch {
+	case os.IsNotExist(err):
 		if writeErr := config.WriteTemplate(*configPath); writeErr != nil {
 			log.Fatalf("config %s not found and writing the bundled template failed: %v", *configPath, writeErr)
 		}
 		log.Fatalf("first run: wrote config template to %s; set upstream_base_url (or upstream_chat_completions_url) and start again", *configPath)
+	case err != nil:
+		// Missing keys only matter cosmetically: Load falls back to the same
+		// defaults, so a read-only config file must not block startup.
+		log.Printf("warning: config %s: could not add missing settings: %v", *configPath, err)
+	case len(added) > 0:
+		log.Printf("config %s: added missing settings: %s", *configPath, strings.Join(added, ", "))
 	}
+
+	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatal(err)
 	}

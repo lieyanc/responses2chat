@@ -34,6 +34,11 @@ vim config.json               # 设置 upstream_base_url
 go run ./cmd/responses2chat   # 正式启动
 ```
 
+若 `config.json` 已存在但缺少新版本引入的配置项，启动时会自动把缺失项
+（含 `update` 段内的嵌套项）按模板默认值补写回文件：已有值、未知键和键
+顺序均保持不变，新键追加在对应对象末尾，并在日志中列出补上的项。文件
+只读时仅告警，不影响启动（缺失项等同默认值）。
+
 默认在工作目录查找 `config.json`，可用 `-config /path/to/config.json`
 指定其他路径。完整配置（即模板内容，均为默认值）：
 

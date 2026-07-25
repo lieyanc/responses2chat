@@ -10,6 +10,10 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/pretty"
+	"github.com/tidwall/sjson"
 )
 
 // Template is the pristine config.json bundled into the binary; it is
@@ -106,4 +110,52 @@ func WriteTemplate(path string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// Migrate appends settings that exist in the bundled template but are
+// missing from the file at path, so configs written by older versions pick
+// up newly introduced keys. Existing values (including unknown keys) and
+// key order are preserved; the file is rewritten only when something was
+// missing. It returns the JSON paths that were added.
+func Migrate(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if !json.Valid(data) {
+		return nil, fmt.Errorf("parse %s: invalid JSON", path)
+	}
+	var added []string
+	merged := addMissing(data, gjson.ParseBytes(Template), "", &added)
+	if len(added) == 0 {
+		return nil, nil
+	}
+	merged = pretty.PrettyOptions(merged, &pretty.Options{Indent: "  "})
+	if err := os.WriteFile(path, merged, 0o644); err != nil {
+		return nil, err
+	}
+	return added, nil
+}
+
+// addMissing walks the template object and appends every key absent from
+// dst, recursing into objects present on both sides.
+func addMissing(dst []byte, tmpl gjson.Result, prefix string, added *[]string) []byte {
+	tmpl.ForEach(func(key, value gjson.Result) bool {
+		path := key.String()
+		if prefix != "" {
+			path = prefix + "." + path
+		}
+		existing := gjson.GetBytes(dst, path)
+		switch {
+		case !existing.Exists():
+			if withKey, err := sjson.SetRawBytes(dst, path, []byte(value.Raw)); err == nil {
+				dst = withKey
+				*added = append(*added, path)
+			}
+		case value.IsObject() && existing.IsObject():
+			dst = addMissing(dst, value, path, added)
+		}
+		return true
+	})
+	return dst
 }

@@ -128,3 +128,111 @@ func TestLoadInvalidJSON(t *testing.T) {
 		t.Fatal("expected parse error for invalid JSON")
 	}
 }
+
+func TestMigrateAddsMissingSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{
+  "listen_addr": ":9090",
+  "upstream_base_url": "https://up.example/v1",
+  "custom_note": "keep me",
+  "update": {
+    "channel": "dev"
+  }
+}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	added, err := Migrate(path)
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	want := map[string]bool{
+		"upstream_chat_completions_url": true,
+		"upstream_proxy_url":            true,
+		"reasoning_passthrough":         true,
+		"update.source":                 true,
+		"update.proxy_base_url":         true,
+		"update.repo":                   true,
+	}
+	if len(added) != len(want) {
+		t.Fatalf("added = %v, want keys %v", added, want)
+	}
+	for _, path := range added {
+		if !want[path] {
+			t.Fatalf("unexpected added path %q", path)
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("migrated file is not valid JSON: %v", err)
+	}
+	if raw["custom_note"] != "keep me" {
+		t.Fatal("unknown key was not preserved")
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ListenAddr != ":9090" {
+		t.Fatalf("listen_addr = %q, existing value was not preserved", cfg.ListenAddr)
+	}
+	if cfg.UpstreamBaseURL != "https://up.example/v1" {
+		t.Fatalf("upstream_base_url = %q, existing value was not preserved", cfg.UpstreamBaseURL)
+	}
+	if cfg.Update.Channel != "dev" {
+		t.Fatalf("update.channel = %q, nested existing value was not preserved", cfg.Update.Channel)
+	}
+	if cfg.Update.Source != "github" {
+		t.Fatalf("update.source = %q, want template default github", cfg.Update.Source)
+	}
+}
+
+func TestMigrateLeavesCompleteConfigUntouched(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := WriteTemplate(path); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	added, err := Migrate(path)
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if len(added) != 0 {
+		t.Fatalf("added = %v, want none for a complete config", added)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("complete config file was rewritten")
+	}
+}
+
+func TestMigrateMissingFile(t *testing.T) {
+	_, err := Migrate(filepath.Join(t.TempDir(), "missing.json"))
+	if !os.IsNotExist(err) {
+		t.Fatalf("want not-exist error, got %v", err)
+	}
+}
+
+func TestMigrateInvalidJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Migrate(path); err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
