@@ -37,8 +37,8 @@ type Config struct {
 	UpstreamBaseURL            string `json:"upstream_base_url"`
 	UpstreamChatCompletionsURL string `json:"upstream_chat_completions_url"`
 	// UpstreamProxyURL routes upstream requests through the given proxy
-	// (http, https or socks5). Empty falls back to the standard proxy
-	// environment variables (HTTP_PROXY/HTTPS_PROXY/NO_PROXY).
+	// (http, https, socks5 or socks5h). Empty falls back to the standard
+	// proxy environment variables (HTTP_PROXY/HTTPS_PROXY/NO_PROXY).
 	UpstreamProxyURL     string `json:"upstream_proxy_url"`
 	ReasoningPassthrough bool   `json:"reasoning_passthrough"`
 	Update               Update `json:"update"`
@@ -75,10 +75,10 @@ func (c Config) ProxyURL() (*url.URL, error) {
 		return nil, fmt.Errorf("invalid upstream_proxy_url %q", c.UpstreamProxyURL)
 	}
 	switch parsed.Scheme {
-	case "http", "https", "socks5":
+	case "http", "https", "socks5", "socks5h":
 		return parsed, nil
 	default:
-		return nil, fmt.Errorf("upstream_proxy_url %q: scheme must be http, https or socks5", c.UpstreamProxyURL)
+		return nil, fmt.Errorf("upstream_proxy_url %q: scheme must be http, https, socks5 or socks5h", c.UpstreamProxyURL)
 	}
 }
 

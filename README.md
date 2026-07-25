@@ -22,7 +22,7 @@ Completions 使用 messages。无法由 Chat Completions 忠实表达的字段�
 
 ## 启动
 
-要求 Go 1.23 或更高版本。全部配置统一放在 `config.json`，不读取任何配置类
+要求 Go 1.24 或更高版本。全部配置统一放在 `config.json`，不读取任何配置类
 环境变量。
 
 首次启动时若 `config.json` 不存在，程序会把打包在二进制内的模板释放到该
@@ -56,7 +56,7 @@ go run ./cmd/responses2chat   # 正式启动
 - `upstream_base_url` 与 `upstream_chat_completions_url` 二选一必填；
   后者非空时优先生效，前者会自动拼接 `/chat/completions`。
 - `upstream_proxy_url` 可选，为上游请求指定代理，支持 `http`、`https`、
-  `socks5`（如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:1080`）。
+  `socks5`、`socks5h`（如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:1080`）。
   留空时回退到标准代理环境变量（`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`）。
 - `listen_addr` 留空时默认 `:8080`。
 

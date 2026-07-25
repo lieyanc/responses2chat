@@ -88,6 +88,7 @@ func TestProxyURL(t *testing.T) {
 		{"http", "http://127.0.0.1:7890", false},
 		{"https", "https://proxy.example:443", false},
 		{"socks5", "socks5://user:pass@127.0.0.1:1080", false},
+		{"socks5h", "socks5h://127.0.0.1:1080", false},
 		{"unsupported scheme", "ftp://127.0.0.1:21", true},
 		{"missing host", "http://", true},
 		{"not a URL", "://bad", true},

@@ -1,6 +1,6 @@
 module github.com/lieyan/responses2chat
 
-go 1.23
+go 1.24
 
 require github.com/openai/openai-go v1.12.0
 
