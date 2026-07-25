@@ -18,22 +18,41 @@ Completions 使用 messages。无法由 Chat Completions 忠实表达的字段�
 
 ## 启动
 
-要求 Go 1.23 或更高版本。
+要求 Go 1.23 或更高版本。全部配置统一放在 `config.json`，不读取任何配置类
+环境变量。
+
+首次启动时若 `config.json` 不存在，程序会把打包在二进制内的模板释放到该
+路径并退出；填写上游地址后再次启动即可：
 
 ```bash
-export UPSTREAM_BASE_URL=https://model.example.com/v1
-go run ./cmd/responses2chat
+go run ./cmd/responses2chat   # 首次运行：生成 ./config.json 后退出
+vim config.json               # 设置 upstream_base_url
+go run ./cmd/responses2chat   # 正式启动
 ```
 
-也可以指定完整地址：
+默认在工作目录查找 `config.json`，可用 `-config /path/to/config.json`
+指定其他路径。完整配置（即模板内容，均为默认值）：
 
-```bash
-export UPSTREAM_CHAT_COMPLETIONS_URL=https://model.example.com/v1/chat/completions
-export LISTEN_ADDR=:8080
-go run ./cmd/responses2chat
+```json
+{
+  "listen_addr": ":8080",
+  "upstream_base_url": "",
+  "upstream_chat_completions_url": "",
+  "reasoning_passthrough": false,
+  "update": {
+    "channel": "stable",
+    "source": "github",
+    "proxy_base_url": "",
+    "repo": ""
+  }
+}
 ```
 
-服务不会读取任何上游 Key 环境变量。New API 发给转换层的
+- `upstream_base_url` 与 `upstream_chat_completions_url` 二选一必填；
+  后者非空时优先生效，前者会自动拼接 `/chat/completions`。
+- `listen_addr` 留空时默认 `:8080`。
+
+服务不会读取任何上游 Key。New API 发给转换层的
 `Authorization`、`x-api-key`、组织/项目头和其他端到端 HTTP 头会原样转发；
 只移除 HTTP hop-by-hop 头并重新计算 `Content-Length`。
 
@@ -41,8 +60,8 @@ go run ./cmd/responses2chat
 
 ### Reasoning 透传（可选）
 
-```bash
-export REASONING_PASSTHROUGH=1
+```json
+{ "reasoning_passthrough": true }
 ```
 
 默认关闭。开启后：
@@ -187,5 +206,7 @@ responses2chat update            # 下载、验签并原地替换二进制(Unix 
 responses2chat update -channel dev   # 跟进 dev 滚动预发布
 ```
 
-可用环境变量:`UPDATE_CHANNEL`(stable|dev)、`UPDATE_SOURCE`(github|proxy)、
-`UPDATE_PROXY_URL`、`UPDATE_REPO`(默认 `lieyanc/responses2chat`)。
+更新配置读取 `config.json` 的 `update` 段：`channel`(stable|dev)、
+`source`(github|proxy)、`proxy_base_url`、`repo`(默认 `lieyanc/responses2chat`)。
+命令行 `-channel`/`-source`/`-proxy-url`/`-repo` 优先于配置文件；没有
+`config.json` 时按内置默认值运行。

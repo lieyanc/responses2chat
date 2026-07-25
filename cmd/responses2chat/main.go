@@ -8,22 +8,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
+	"github.com/lieyan/responses2chat/internal/config"
 	"github.com/lieyan/responses2chat/internal/gateway"
 	"github.com/lieyan/responses2chat/internal/updater"
 	"github.com/lieyan/responses2chat/internal/version"
 )
-
-func envBool(name string) bool {
-	switch strings.ToLower(os.Getenv(name)) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
 
 func main() {
 	if len(os.Args) > 1 {
@@ -37,24 +28,32 @@ func main() {
 		}
 	}
 
-	upstream := os.Getenv("UPSTREAM_CHAT_COMPLETIONS_URL")
-	if upstream == "" {
-		base := os.Getenv("UPSTREAM_BASE_URL")
-		if base == "" {
-			log.Fatal("UPSTREAM_CHAT_COMPLETIONS_URL or UPSTREAM_BASE_URL is required")
+	configPath := flag.String("config", config.DefaultPath, "path to config.json")
+	flag.Parse()
+
+	cfg, err := config.Load(*configPath)
+	if os.IsNotExist(err) {
+		if writeErr := config.WriteTemplate(*configPath); writeErr != nil {
+			log.Fatalf("config %s not found and writing the bundled template failed: %v", *configPath, writeErr)
 		}
-		upstream = gateway.ChatCompletionsURL(base)
+		log.Fatalf("first run: wrote config template to %s; set upstream_base_url (or upstream_chat_completions_url) and start again", *configPath)
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := cfg.ValidateServer(); err != nil {
+		log.Fatalf("config %s: %v", *configPath, err)
 	}
 
-	addr := os.Getenv("LISTEN_ADDR")
-	if addr == "" {
-		addr = ":8080"
+	upstream := cfg.UpstreamChatCompletionsURL
+	if upstream == "" {
+		upstream = gateway.ChatCompletionsURL(cfg.UpstreamBaseURL)
 	}
 
 	handler, err := gateway.New(gateway.Config{
 		UpstreamURL:          upstream,
 		MaxBodySize:          32 << 20,
-		ReasoningPassthrough: envBool("REASONING_PASSTHROUGH"),
+		ReasoningPassthrough: cfg.ReasoningPassthrough,
 		HTTPClient: &http.Client{
 			Transport: &http.Transport{
 				Proxy:                 http.ProxyFromEnvironment,
@@ -72,26 +71,48 @@ func main() {
 	}
 
 	server := &http.Server{
-		Addr:              addr,
+		Addr:              cfg.ListenAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
-	log.Printf("responses2chat listening on %s, upstream=%s", addr, upstream)
+	log.Printf("responses2chat listening on %s, upstream=%s", cfg.ListenAddr, upstream)
 	log.Fatal(server.ListenAndServe())
 }
 
 // runUpdate implements `responses2chat update`: a synchronous self-update
 // that checks the signed GitHub release, downloads, verifies, and replaces
-// the current binary in place.
+// the current binary in place. Defaults come from the update section of
+// config.json when present; command-line flags override the file.
 func runUpdate(args []string) {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
-	channel := fs.String("channel", envOr("UPDATE_CHANNEL", "stable"), "release channel: stable or dev")
-	source := fs.String("source", envOr("UPDATE_SOURCE", "github"), "download source: github or proxy")
-	proxyURL := fs.String("proxy-url", os.Getenv("UPDATE_PROXY_URL"), "proxy mirror base URL (source=proxy)")
-	repo := fs.String("repo", os.Getenv("UPDATE_REPO"), "GitHub repo owner/name")
+	configPath := fs.String("config", config.DefaultPath, "path to config.json")
+	channel := fs.String("channel", "", "release channel: stable or dev")
+	source := fs.String("source", "", "download source: github or proxy")
+	proxyURL := fs.String("proxy-url", "", "proxy mirror base URL (source=proxy)")
+	repo := fs.String("repo", "", "GitHub repo owner/name")
 	checkOnly := fs.Bool("check", false, "only check for a new version, do not install")
 	_ = fs.Parse(args)
+
+	// A missing config file is fine for update: built-in defaults apply.
+	fileCfg, err := config.Load(*configPath)
+	if err != nil && !os.IsNotExist(err) {
+		log.Fatal(err)
+	}
+
+	upd := fileCfg.Update
+	if *channel != "" {
+		upd.Channel = *channel
+	}
+	if *source != "" {
+		upd.Source = *source
+	}
+	if *proxyURL != "" {
+		upd.ProxyBaseURL = *proxyURL
+	}
+	if *repo != "" {
+		upd.Repo = *repo
+	}
 
 	dataDir, err := os.UserCacheDir()
 	if err != nil {
@@ -101,10 +122,10 @@ func runUpdate(args []string) {
 
 	cfg := updater.Config{
 		Enabled:      true,
-		Channel:      *channel,
-		Source:       *source,
-		ProxyBaseURL: *proxyURL,
-		Repo:         *repo,
+		Channel:      upd.Channel,
+		Source:       upd.Source,
+		ProxyBaseURL: upd.ProxyBaseURL,
+		Repo:         upd.Repo,
 	}
 	u := updater.New(
 		func() updater.Config { return cfg },
@@ -129,11 +150,4 @@ func runUpdate(args []string) {
 	if err := u.RunOnce(ctx); err != nil {
 		log.Fatalf("update failed: %v", err)
 	}
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

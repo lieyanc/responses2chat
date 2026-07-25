@@ -1,0 +1,12 @@
+{
+  "listen_addr": ":8080",
+  "upstream_base_url": "",
+  "upstream_chat_completions_url": "",
+  "reasoning_passthrough": false,
+  "update": {
+    "channel": "stable",
+    "source": "github",
+    "proxy_base_url": "",
+    "repo": ""
+  }
+}
