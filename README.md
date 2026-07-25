@@ -16,6 +16,10 @@ Responses API 形状。
 Completions 使用 messages。无法由 Chat Completions 忠实表达的字段、Item、
 内容部分和工具会逐项丢弃，不会原样泄漏给上游导致 unknown-field 错误。
 
+正常的 Chat Completions 请求不做任何转换：`POST /v1/chat/completions`
+会把请求体和端到端头原样透传给上游，响应（含 SSE 流）也逐块原样返回，
+因此可以把两类流量都指向本服务。
+
 ## 启动
 
 要求 Go 1.23 或更高版本。全部配置统一放在 `config.json`，不读取任何配置类
@@ -38,6 +42,7 @@ go run ./cmd/responses2chat   # 正式启动
   "listen_addr": ":8080",
   "upstream_base_url": "",
   "upstream_chat_completions_url": "",
+  "upstream_proxy_url": "",
   "reasoning_passthrough": false,
   "update": {
     "channel": "stable",
@@ -50,6 +55,9 @@ go run ./cmd/responses2chat   # 正式启动
 
 - `upstream_base_url` 与 `upstream_chat_completions_url` 二选一必填；
   后者非空时优先生效，前者会自动拼接 `/chat/completions`。
+- `upstream_proxy_url` 可选，为上游请求指定代理，支持 `http`、`https`、
+  `socks5`（如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:1080`）。
+  留空时回退到标准代理环境变量（`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`）。
 - `listen_addr` 留空时默认 `:8080`。
 
 服务不会读取任何上游 Key。New API 发给转换层的

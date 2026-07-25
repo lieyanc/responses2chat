@@ -255,6 +255,74 @@ func assertMonotonicSequences(t *testing.T, stream string) {
 	}
 }
 
+func TestHandlerProxiesChatCompletionsVerbatim(t *testing.T) {
+	requestBody := `{"model":"m","messages":[{"role":"user","content":"hi"}],"some_future_field":{"nested":true}}`
+	responseBody := `{"id":"chatcmpl-raw","object":"chat.completion","vendor_extension":123,"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
+	var upstreamAuth, upstreamGot string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("upstream path = %s", r.URL.Path)
+		}
+		upstreamAuth = r.Header.Get("Authorization")
+		body, _ := io.ReadAll(r.Body)
+		upstreamGot = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, responseBody)
+	}))
+	defer upstream.Close()
+	handler, _ := New(Config{UpstreamURL: upstream.URL + "/v1/chat/completions"})
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer chat-key")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if upstreamGot != requestBody {
+		t.Fatalf("request body was not passed through verbatim: %s", upstreamGot)
+	}
+	if upstreamAuth != "Bearer chat-key" {
+		t.Fatalf("authorization was not passed through: %q", upstreamAuth)
+	}
+	if recorder.Body.String() != responseBody {
+		t.Fatalf("response body was not passed through verbatim: %s", recorder.Body.String())
+	}
+}
+
+func TestHandlerProxiesChatCompletionsStreamVerbatim(t *testing.T) {
+	chunks := []string{
+		`data: {"id":"chatcmpl-raw","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}` + "\n\n",
+		`data: {"id":"chatcmpl-raw","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n",
+		"data: [DONE]\n\n",
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		for _, chunk := range chunks {
+			_, _ = io.WriteString(w, chunk)
+			flusher.Flush()
+		}
+	}))
+	defer upstream.Close()
+	handler, _ := New(Config{UpstreamURL: upstream.URL})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	res, err := http.Post(server.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"m","messages":[],"stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("content-type = %q", res.Header.Get("Content-Type"))
+	}
+	body, _ := io.ReadAll(res.Body)
+	if string(body) != strings.Join(chunks, "") {
+		t.Fatalf("stream was not passed through verbatim:\n%s", body)
+	}
+}
+
 func TestCopyEndToEndHeadersRemovesConnectionTokens(t *testing.T) {
 	source := http.Header{
 		"Authorization": []string{"Bearer secret"},

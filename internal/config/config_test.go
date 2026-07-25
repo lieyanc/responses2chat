@@ -78,6 +78,46 @@ func TestLoadMissingFile(t *testing.T) {
 	}
 }
 
+func TestProxyURL(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{"empty", "", false},
+		{"http", "http://127.0.0.1:7890", false},
+		{"https", "https://proxy.example:443", false},
+		{"socks5", "socks5://user:pass@127.0.0.1:1080", false},
+		{"unsupported scheme", "ftp://127.0.0.1:21", true},
+		{"missing host", "http://", true},
+		{"not a URL", "://bad", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{UpstreamBaseURL: "https://up.example/v1", UpstreamProxyURL: tc.raw}
+			parsed, err := cfg.ProxyURL()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ProxyURL(%q): expected error", tc.raw)
+				}
+				if cfg.ValidateServer() == nil {
+					t.Fatalf("ValidateServer must reject upstream_proxy_url %q", tc.raw)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ProxyURL(%q): %v", tc.raw, err)
+			}
+			if (tc.raw == "") != (parsed == nil) {
+				t.Fatalf("ProxyURL(%q) = %v, nil only for empty input", tc.raw, parsed)
+			}
+			if err := cfg.ValidateServer(); err != nil {
+				t.Fatalf("ValidateServer: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadInvalidJSON(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {

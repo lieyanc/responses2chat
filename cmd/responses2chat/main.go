@@ -50,13 +50,22 @@ func main() {
 		upstream = gateway.ChatCompletionsURL(cfg.UpstreamBaseURL)
 	}
 
+	proxy := http.ProxyFromEnvironment
+	proxyURL, err := cfg.ProxyURL()
+	if err != nil {
+		log.Fatalf("config %s: %v", *configPath, err)
+	}
+	if proxyURL != nil {
+		proxy = http.ProxyURL(proxyURL)
+	}
+
 	handler, err := gateway.New(gateway.Config{
 		UpstreamURL:          upstream,
 		MaxBodySize:          32 << 20,
 		ReasoningPassthrough: cfg.ReasoningPassthrough,
 		HTTPClient: &http.Client{
 			Transport: &http.Transport{
-				Proxy:                 http.ProxyFromEnvironment,
+				Proxy:                 proxy,
 				MaxIdleConns:          100,
 				MaxIdleConnsPerHost:   100,
 				IdleConnTimeout:       90 * time.Second,
@@ -76,7 +85,11 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
-	log.Printf("responses2chat listening on %s, upstream=%s", cfg.ListenAddr, upstream)
+	if proxyURL != nil {
+		log.Printf("responses2chat listening on %s, upstream=%s, proxy=%s", cfg.ListenAddr, upstream, proxyURL.Redacted())
+	} else {
+		log.Printf("responses2chat listening on %s, upstream=%s", cfg.ListenAddr, upstream)
+	}
 	log.Fatal(server.ListenAndServe())
 }
 

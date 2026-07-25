@@ -65,6 +65,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"status":"ok"}`)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/responses":
 		h.createResponse(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
+		h.proxyChatCompletions(w, r)
 	default:
 		writeAPIError(w, http.StatusNotFound, "route not found", "invalid_request_error", nil)
 	}
@@ -147,6 +149,63 @@ func (h *Handler) createResponse(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(upstreamResponse.StatusCode)
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+// proxyChatCompletions forwards native Chat Completions requests to the
+// upstream verbatim: no body conversion, end-to-end headers preserved, and
+// SSE responses relayed chunk by chunk.
+func (h *Handler) proxyChatCompletions(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxBodySize)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeAPIError(w, http.StatusRequestEntityTooLarge, "request body is too large", "invalid_request_error", nil)
+			return
+		}
+		writeAPIError(w, http.StatusBadRequest, "failed to read request body", "invalid_request_error", nil)
+		return
+	}
+
+	upstreamRequest, err := http.NewRequestWithContext(r.Context(), http.MethodPost, h.upstreamURL, bytes.NewReader(body))
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "failed to create upstream request", "server_error", nil)
+		return
+	}
+	copyEndToEndHeaders(upstreamRequest.Header, r.Header)
+
+	upstreamResponse, err := h.client.Do(upstreamRequest)
+	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
+		h.logger.Printf("upstream request failed: %v", err)
+		writeAPIError(w, http.StatusBadGateway, "upstream request failed", "upstream_error", nil)
+		return
+	}
+	defer upstreamResponse.Body.Close()
+	copyEndToEndHeaders(w.Header(), upstreamResponse.Header)
+	w.WriteHeader(upstreamResponse.StatusCode)
+
+	flusher, _ := w.(http.Flusher)
+	buffer := make([]byte, 32<<10)
+	for {
+		n, readErr := upstreamResponse.Body.Read(buffer)
+		if n > 0 {
+			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) && r.Context().Err() == nil {
+				h.logger.Printf("chat completions passthrough failed: %v", readErr)
+			}
+			return
+		}
+	}
 }
 
 func (h *Handler) proxyError(w http.ResponseWriter, response *http.Response) {

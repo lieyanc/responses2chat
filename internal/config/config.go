@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -35,8 +36,12 @@ type Config struct {
 	ListenAddr                 string `json:"listen_addr"`
 	UpstreamBaseURL            string `json:"upstream_base_url"`
 	UpstreamChatCompletionsURL string `json:"upstream_chat_completions_url"`
-	ReasoningPassthrough       bool   `json:"reasoning_passthrough"`
-	Update                     Update `json:"update"`
+	// UpstreamProxyURL routes upstream requests through the given proxy
+	// (http, https or socks5). Empty falls back to the standard proxy
+	// environment variables (HTTP_PROXY/HTTPS_PROXY/NO_PROXY).
+	UpstreamProxyURL     string `json:"upstream_proxy_url"`
+	ReasoningPassthrough bool   `json:"reasoning_passthrough"`
+	Update               Update `json:"update"`
 }
 
 // Load parses the file at path and applies defaults. Serving traffic
@@ -56,13 +61,34 @@ func Load(path string) (Config, error) {
 	}
 	cfg.UpstreamBaseURL = strings.TrimSpace(cfg.UpstreamBaseURL)
 	cfg.UpstreamChatCompletionsURL = strings.TrimSpace(cfg.UpstreamChatCompletionsURL)
+	cfg.UpstreamProxyURL = strings.TrimSpace(cfg.UpstreamProxyURL)
 	return cfg, nil
+}
+
+// ProxyURL parses upstream_proxy_url, returning nil when it is unset.
+func (c Config) ProxyURL() (*url.URL, error) {
+	if c.UpstreamProxyURL == "" {
+		return nil, nil
+	}
+	parsed, err := url.Parse(c.UpstreamProxyURL)
+	if err != nil || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid upstream_proxy_url %q", c.UpstreamProxyURL)
+	}
+	switch parsed.Scheme {
+	case "http", "https", "socks5":
+		return parsed, nil
+	default:
+		return nil, fmt.Errorf("upstream_proxy_url %q: scheme must be http, https or socks5", c.UpstreamProxyURL)
+	}
 }
 
 // ValidateServer checks the fields required to run the gateway.
 func (c Config) ValidateServer() error {
 	if c.UpstreamBaseURL == "" && c.UpstreamChatCompletionsURL == "" {
 		return fmt.Errorf("upstream_base_url or upstream_chat_completions_url is required")
+	}
+	if _, err := c.ProxyURL(); err != nil {
+		return err
 	}
 	return nil
 }
