@@ -8,12 +8,22 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/lieyan/responses2chat/internal/gateway"
 	"github.com/lieyan/responses2chat/internal/updater"
 	"github.com/lieyan/responses2chat/internal/version"
 )
+
+func envBool(name string) bool {
+	switch strings.ToLower(os.Getenv(name)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
 
 func main() {
 	if len(os.Args) > 1 {
@@ -42,8 +52,9 @@ func main() {
 	}
 
 	handler, err := gateway.New(gateway.Config{
-		UpstreamURL: upstream,
-		MaxBodySize: 32 << 20,
+		UpstreamURL:          upstream,
+		MaxBodySize:          32 << 20,
+		ReasoningPassthrough: envBool("REASONING_PASSTHROUGH"),
 		HTTPClient: &http.Client{
 			Transport: &http.Transport{
 				Proxy:                 http.ProxyFromEnvironment,

@@ -28,7 +28,7 @@ func convertResponse(body []byte, meta requestMeta) (map[string]any, error) {
 	if status == "incomplete" {
 		itemStatus = "incomplete"
 	}
-	output := convertChatMessage(message, choice, itemStatus)
+	output := convertChatMessage(message, choice, itemStatus, meta.reasoning)
 
 	created := int64Number(chat["created"])
 	if created == 0 {
@@ -49,8 +49,13 @@ func convertResponse(body []byte, meta requestMeta) (map[string]any, error) {
 	return response, nil
 }
 
-func convertChatMessage(message, choice map[string]any, itemStatus string) []any {
+func convertChatMessage(message, choice map[string]any, itemStatus string, reasoningPassthrough bool) []any {
 	output := make([]any, 0)
+	if reasoningPassthrough {
+		if text := chatReasoningText(message); text != "" {
+			output = append(output, reasoningItem(newID("rs"), text, itemStatus))
+		}
+	}
 	contentParts := make([]any, 0, 2)
 	if content, ok := message["content"].(string); ok {
 		part := map[string]any{
@@ -102,6 +107,27 @@ func convertChatMessage(message, choice map[string]any, itemStatus string) []any
 		}
 	}
 	return output
+}
+
+func chatReasoningText(message map[string]any) string {
+	if text, ok := message["reasoning_content"].(string); ok && text != "" {
+		return text
+	}
+	if text, ok := message["reasoning"].(string); ok && text != "" {
+		return text
+	}
+	return ""
+}
+
+func reasoningItem(id, text, status string) map[string]any {
+	return map[string]any{
+		"id":     id,
+		"type":   "reasoning",
+		"status": status,
+		"summary": []any{
+			map[string]any{"type": "summary_text", "text": text},
+		},
+	}
 }
 
 func functionCallOutput(callID, name, arguments, status string) map[string]any {

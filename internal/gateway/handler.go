@@ -17,13 +17,18 @@ type Config struct {
 	MaxBodySize int64
 	HTTPClient  *http.Client
 	Logger      *log.Logger
+	// ReasoningPassthrough forwards reasoning Items from Responses input to the
+	// upstream as the non-standard assistant reasoning_content field, and maps
+	// upstream reasoning_content back to Responses reasoning output Items.
+	ReasoningPassthrough bool
 }
 
 type Handler struct {
-	upstreamURL string
-	maxBodySize int64
-	client      *http.Client
-	logger      *log.Logger
+	upstreamURL          string
+	maxBodySize          int64
+	client               *http.Client
+	logger               *log.Logger
+	reasoningPassthrough bool
 }
 
 func New(config Config) (*Handler, error) {
@@ -41,10 +46,11 @@ func New(config Config) (*Handler, error) {
 		config.Logger = log.Default()
 	}
 	return &Handler{
-		upstreamURL: parsed.String(),
-		maxBodySize: config.MaxBodySize,
-		client:      config.HTTPClient,
-		logger:      config.Logger,
+		upstreamURL:          parsed.String(),
+		maxBodySize:          config.MaxBodySize,
+		client:               config.HTTPClient,
+		logger:               config.Logger,
+		reasoningPassthrough: config.ReasoningPassthrough,
 	}, nil
 }
 
@@ -77,7 +83,7 @@ func (h *Handler) createResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chatRequest, meta, err := convertRequest(body)
+	chatRequest, meta, err := convertRequest(body, h.reasoningPassthrough)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", nil)
 		return

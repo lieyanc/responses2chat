@@ -69,6 +69,13 @@ type streamTool struct {
 	added        bool
 }
 
+type streamReasoning struct {
+	id          string
+	outputIndex int
+	added       bool
+	text        string
+}
+
 type streamState struct {
 	meta         requestMeta
 	writer       *eventWriter
@@ -76,6 +83,7 @@ type streamState struct {
 	created      int64
 	model        string
 	started      bool
+	reasoning    *streamReasoning
 	message      *streamMessage
 	tools        map[int]*streamTool
 	nextOutput   int
@@ -167,6 +175,13 @@ func (s *streamState) consume(chunk map[string]any) error {
 			s.finishReason = finish
 		}
 		delta, _ := object(choice["delta"])
+		if s.meta.reasoning {
+			if reasoning := chatReasoningText(delta); reasoning != "" {
+				if err := s.reasoningDelta(reasoning); err != nil {
+					return err
+				}
+			}
+		}
 		if content, ok := delta["content"].(string); ok && content != "" {
 			if err := s.textDelta("output_text", content, choice["logprobs"]); err != nil {
 				return err
@@ -216,6 +231,45 @@ func (s *streamState) consume(chunk map[string]any) error {
 		}
 	}
 	return nil
+}
+
+func (s *streamState) reasoningDelta(delta string) error {
+	if s.reasoning == nil {
+		s.reasoning = &streamReasoning{
+			id:          newID("rs"),
+			outputIndex: s.nextOutput,
+		}
+		s.nextOutput++
+	}
+	if !s.reasoning.added {
+		s.reasoning.added = true
+		if err := s.writer.event("response.output_item.added", map[string]any{
+			"output_index": s.reasoning.outputIndex,
+			"item": map[string]any{
+				"id":      s.reasoning.id,
+				"type":    "reasoning",
+				"status":  "in_progress",
+				"summary": []any{},
+			},
+		}); err != nil {
+			return err
+		}
+		if err := s.writer.event("response.reasoning_summary_part.added", map[string]any{
+			"item_id":       s.reasoning.id,
+			"output_index":  s.reasoning.outputIndex,
+			"summary_index": 0,
+			"part":          map[string]any{"type": "summary_text", "text": ""},
+		}); err != nil {
+			return err
+		}
+	}
+	s.reasoning.text += delta
+	return s.writer.event("response.reasoning_summary_text.delta", map[string]any{
+		"item_id":       s.reasoning.id,
+		"output_index":  s.reasoning.outputIndex,
+		"summary_index": 0,
+		"delta":         delta,
+	})
 }
 
 func (s *streamState) ensureMessage() (*streamMessage, error) {
@@ -350,6 +404,30 @@ func (s *streamState) finish() error {
 	}
 	if s.message == nil && len(s.tools) == 0 && s.finishReason != "tool_calls" {
 		if err := s.textDelta("output_text", "", nil); err != nil {
+			return err
+		}
+	}
+	if s.reasoning != nil && s.reasoning.added {
+		if err := s.writer.event("response.reasoning_summary_text.done", map[string]any{
+			"item_id":       s.reasoning.id,
+			"output_index":  s.reasoning.outputIndex,
+			"summary_index": 0,
+			"text":          s.reasoning.text,
+		}); err != nil {
+			return err
+		}
+		if err := s.writer.event("response.reasoning_summary_part.done", map[string]any{
+			"item_id":       s.reasoning.id,
+			"output_index":  s.reasoning.outputIndex,
+			"summary_index": 0,
+			"part":          map[string]any{"type": "summary_text", "text": s.reasoning.text},
+		}); err != nil {
+			return err
+		}
+		if err := s.writer.event("response.output_item.done", map[string]any{
+			"output_index": s.reasoning.outputIndex,
+			"item":         reasoningItem(s.reasoning.id, s.reasoning.text, itemStatus),
+		}); err != nil {
 			return err
 		}
 	}
@@ -503,7 +581,10 @@ func (s *streamState) finalOutput(status string) []any {
 		index int
 		item  any
 	}
-	items := make([]indexed, 0, 1+len(s.tools))
+	items := make([]indexed, 0, 2+len(s.tools))
+	if s.reasoning != nil && s.reasoning.added {
+		items = append(items, indexed{s.reasoning.outputIndex, reasoningItem(s.reasoning.id, s.reasoning.text, status)})
+	}
 	if s.message != nil {
 		items = append(items, indexed{s.message.outputIndex, s.messageItem(status)})
 	}

@@ -39,6 +39,26 @@ go run ./cmd/responses2chat
 
 健康检查：`GET /healthz`。
 
+### Reasoning 透传（可选）
+
+```bash
+export REASONING_PASSTHROUGH=1
+```
+
+默认关闭。开启后：
+
+- 输入侧：`input` 中回放的 `reasoning` item（Codex/OpenCode 等客户端默认会回传上一轮的
+  reasoning）会提取文本（优先 `content[].reasoning_text`，其次 `summary[].summary_text`），
+  作为非标准的 `reasoning_content` 字段附加到其后紧跟的 assistant 消息上发给上游。
+- 输出侧：上游响应/流式 delta 中的 `reasoning_content`（或 `reasoning`）字段会转换为
+  Responses 的 `reasoning` output item（文本放入 `summary_text`），流式对应
+  `response.reasoning_summary_part.added` / `response.reasoning_summary_text.delta` /
+  `.done` 事件序列，客户端可以直接显示思考过程。
+
+注意：部分上游（如 DeepSeek 官方 API）不接受请求中携带 `reasoning_content`，会返回 400；
+此类上游请保持该选项关闭（关闭时 reasoning item 会被静默丢弃，上游每轮重新推理）。
+
+
 ## 请求转换
 
 ### 顶层字段

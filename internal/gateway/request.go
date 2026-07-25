@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 type requestMeta struct {
@@ -12,16 +13,17 @@ type requestMeta struct {
 	appliedTools      []any
 	appliedToolChoice any
 	stream            bool
+	reasoning         bool
 }
 
-func convertRequest(body []byte) (map[string]any, requestMeta, error) {
+func convertRequest(body []byte, reasoningPassthrough bool) (map[string]any, requestMeta, error) {
 	src, err := decodeJSONObject(bytes.NewReader(body))
 	if err != nil {
 		return nil, requestMeta{}, fmt.Errorf("invalid JSON request: %w", err)
 	}
 
 	dst := make(map[string]any)
-	meta := requestMeta{original: src}
+	meta := requestMeta{original: src, reasoning: reasoningPassthrough}
 	copyFields(src, dst,
 		"model", "parallel_tool_calls", "temperature", "top_p",
 		"prompt_cache_key", "safety_identifier", "user", "service_tier", "metadata",
@@ -39,7 +41,7 @@ func convertRequest(body []byte) (map[string]any, requestMeta, error) {
 		})
 	}
 	if input, ok := src["input"]; ok && input != nil {
-		converted, err := convertInput(input)
+		converted, err := convertInput(input, reasoningPassthrough)
 		if err != nil {
 			return nil, requestMeta{}, err
 		}
@@ -105,20 +107,31 @@ func object(value any) (map[string]any, bool) {
 	return v, ok
 }
 
-func convertInput(input any) ([]any, error) {
+func convertInput(input any, reasoningPassthrough bool) ([]any, error) {
 	switch value := input.(type) {
 	case string:
 		return []any{map[string]any{"role": "user", "content": value}}, nil
 	case []any:
-		return convertItems(value), nil
+		return convertItems(value, reasoningPassthrough), nil
 	default:
 		return nil, errors.New("input must be a string or an array of input items")
 	}
 }
 
-func convertItems(items []any) []any {
+func convertItems(items []any, reasoningPassthrough bool) []any {
 	messages := make([]any, 0, len(items))
 	lastAssistant := -1
+	pendingReasoning := ""
+
+	attachReasoning := func(assistant map[string]any) {
+		if pendingReasoning == "" {
+			return
+		}
+		if assistant["reasoning_content"] == nil {
+			assistant["reasoning_content"] = pendingReasoning
+		}
+		pendingReasoning = ""
+	}
 
 	for _, raw := range items {
 		item, ok := object(raw)
@@ -139,8 +152,10 @@ func convertItems(items []any) []any {
 			messages = append(messages, message)
 			if message["role"] == "assistant" {
 				lastAssistant = len(messages) - 1
+				attachReasoning(message)
 			} else {
 				lastAssistant = -1
+				pendingReasoning = ""
 			}
 		case "function_call":
 			call, ok := convertFunctionCall(item)
@@ -148,15 +163,18 @@ func convertItems(items []any) []any {
 				continue
 			}
 			if lastAssistant < 0 {
-				messages = append(messages, map[string]any{
+				assistant := map[string]any{
 					"role":       "assistant",
 					"tool_calls": []any{call},
-				})
+				}
+				attachReasoning(assistant)
+				messages = append(messages, assistant)
 				lastAssistant = len(messages) - 1
 			} else {
 				assistant := messages[lastAssistant].(map[string]any)
 				calls, _ := assistant["tool_calls"].([]any)
 				assistant["tool_calls"] = append(calls, call)
+				attachReasoning(assistant)
 			}
 		case "function_call_output":
 			message, ok := convertFunctionOutput(item)
@@ -165,13 +183,46 @@ func convertItems(items []any) []any {
 			}
 			messages = append(messages, message)
 			lastAssistant = -1
+			pendingReasoning = ""
+		case "reasoning":
+			if !reasoningPassthrough {
+				continue
+			}
+			// A reasoning Item precedes the assistant message or function call it
+			// belongs to; hold its text and attach it to that assistant message as
+			// the non-standard reasoning_content field understood by reasoning-model
+			// Chat upstreams.
+			if text := reasoningItemText(item); text != "" {
+				pendingReasoning = text
+			}
 		default:
-			// Reasoning, hosted/MCP/computer/shell/image-generation calls, item
-			// references, approvals and any future Items have no faithful Chat
-			// Completions message representation. They are intentionally dropped.
+			// Hosted/MCP/computer/shell/image-generation calls, item references,
+			// approvals and any future Items have no faithful Chat Completions
+			// message representation. They are intentionally dropped.
 		}
 	}
 	return messages
+}
+
+func reasoningItemText(item map[string]any) string {
+	collect := func(value any, partType, field string) string {
+		parts, _ := value.([]any)
+		texts := make([]string, 0, len(parts))
+		for _, raw := range parts {
+			part, ok := object(raw)
+			if !ok || part["type"] != partType {
+				continue
+			}
+			if text, ok := part[field].(string); ok && text != "" {
+				texts = append(texts, text)
+			}
+		}
+		return strings.Join(texts, "\n")
+	}
+	if text := collect(item["content"], "reasoning_text", "text"); text != "" {
+		return text
+	}
+	return collect(item["summary"], "summary_text", "text")
 }
 
 func convertMessage(item map[string]any) (map[string]any, bool) {

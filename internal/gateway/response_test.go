@@ -11,7 +11,7 @@ func TestConvertResponseTextToolsUsageAndIncomplete(t *testing.T) {
       "input":"hello",
       "max_output_tokens":5,
       "tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]
-    }`))
+    }`), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,5 +71,41 @@ func TestConvertResponseTextToolsUsageAndIncomplete(t *testing.T) {
 	}
 	if _, err := json.Marshal(got); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestConvertResponseReasoningPassthrough(t *testing.T) {
+	_, meta, err := convertRequest([]byte(`{"model":"m","input":"hi"}`), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{
+  "id": "chatcmpl-1",
+  "created": 1,
+  "model": "m",
+  "choices": [{
+    "index": 0,
+    "finish_reason": "stop",
+    "message": {"role":"assistant","content":"answer","reasoning_content":"because"}
+  }]
+}`)
+	got, err := convertResponse(body, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := got["output"].([]any)
+	if len(output) != 2 {
+		t.Fatalf("output = %#v", output)
+	}
+	reasoning := output[0].(map[string]any)
+	if reasoning["type"] != "reasoning" {
+		t.Fatalf("first item = %#v", reasoning)
+	}
+	summary := reasoning["summary"].([]any)[0].(map[string]any)
+	if summary["text"] != "because" {
+		t.Fatalf("summary = %#v", summary)
+	}
+	if output[1].(map[string]any)["type"] != "message" {
+		t.Fatalf("second item = %#v", output[1])
 	}
 }

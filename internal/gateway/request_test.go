@@ -45,7 +45,7 @@ func TestConvertRequestPreservesCompatibleContext(t *testing.T) {
   "background": true
 }`)
 
-	got, meta, err := convertRequest(body)
+	got, meta, err := convertRequest(body, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestConvertRequestDropsUnsupportedOnly(t *testing.T) {
       ],
       "tools":[{"type":"file_search","vector_store_ids":["vs"]}],
       "tool_choice":"required"
-    }`))
+    }`), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,48 @@ func TestConvertRequestDropsUnsupportedOnly(t *testing.T) {
 }
 
 func TestConvertRequestRejectsTrailingJSON(t *testing.T) {
-	if _, _, err := convertRequest([]byte(`{"model":"m","input":"x"} {"second":true}`)); err == nil {
+	if _, _, err := convertRequest([]byte(`{"model":"m","input":"x"} {"second":true}`), false); err == nil {
 		t.Fatal("multiple JSON values must be rejected")
+	}
+}
+
+func TestConvertRequestReasoningPassthrough(t *testing.T) {
+	body := []byte(`{
+  "model": "test-model",
+  "input": [
+    {"role":"user","content":"hi"},
+    {"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking about it"}]},
+    {"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},
+    {"type":"function_call_output","call_id":"call_1","output":"result"},
+    {"type":"reasoning","id":"rs_2","content":[{"type":"reasoning_text","text":"raw thoughts"}]},
+    {"type":"message","role":"assistant","content":"done"}
+  ]
+}`)
+
+	got, _, err := convertRequest(body, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := got["messages"].([]any)
+	if len(messages) != 4 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	toolCaller := messages[1].(map[string]any)
+	if toolCaller["reasoning_content"] != "thinking about it" {
+		t.Fatalf("tool-call reasoning_content = %#v", toolCaller["reasoning_content"])
+	}
+	final := messages[3].(map[string]any)
+	if final["reasoning_content"] != "raw thoughts" {
+		t.Fatalf("final reasoning_content = %#v", final["reasoning_content"])
+	}
+
+	off, _, err := convertRequest(body, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range off["messages"].([]any) {
+		if raw.(map[string]any)["reasoning_content"] != nil {
+			t.Fatal("reasoning_content leaked with passthrough disabled")
+		}
 	}
 }
